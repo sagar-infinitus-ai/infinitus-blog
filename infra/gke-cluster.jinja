@@ -1,0 +1,120 @@
+# Specifies the infrastructure for building our k8s cluster on GKE.
+# Intended to be run via the gcloud CLI using the deployment-manager commands.
+# ref: https://cloud.google.com/deployment-manager/docs/configuration/create-basic-configuration
+# https://cloud.google.com/deployment-manager/docs/configuration/templates/create-basic-template
+# This template uses the following properties:
+# required: network, region, zone, master_cidr, subnet_cidr
+# optional: static_ip
+# For resource details, see:
+# https://cloud.google.com/kubernetes-engine/docs/reference/rest/v1/projects.locations.clusters
+
+{% set NETWORK = properties["network"] %}
+{% set REGION = properties["region"] %}
+{% set ZONE = properties["zone"] %}
+{% set DEPLOYMENT = env["deployment"] %}
+{% set PROJECT = env["project"] %}
+{% set SUBNET_NAME = DEPLOYMENT + '-subnet' %}
+{% set SUBNET_RANGE = properties["subnet_cidr"] %}
+{% set ROUTER_NAME = DEPLOYMENT + '-router' %}
+{% set NAT_NAME = ROUTER_NAME + '-nat' %}
+{% set MASTER_CIDR = properties["master_cidr"] %}
+{% set NODE_TAG_NAME = DEPLOYMENT + '-node' %}
+{% set FIREWALL_RULE = DEPLOYMENT + '-nginx-fw-rule' %}
+{% set NGINX_INGRESS_ALLOWED_PORT = 8443 %}
+
+resources:
+  - name: {{ SUBNET_NAME }}
+    type: gcp-types/compute-v1:subnetworks
+    properties:
+      network: {{ NETWORK }}
+      region: {{ REGION }}
+      ipCidrRange: {{ SUBNET_RANGE }}
+  - name: {{ ROUTER_NAME }}
+    type: gcp-types/compute-v1:routers
+    properties:
+      network: {{ NETWORK }}
+      region: {{ REGION }}
+      nats:
+        - name: {{ NAT_NAME }}
+          natIpAllocateOption: AUTO_ONLY
+          sourceSubnetworkIpRangesToNat: LIST_OF_SUBNETWORKS
+          subnetworks:
+            - name: $(ref.{{ SUBNET_NAME }}.selfLink)
+              sourceIpRangesToNat:
+                - ALL_IP_RANGES
+  - name: {{ DEPLOYMENT }}
+    type: gcp-types/container-v1:projects.zones.clusters
+    properties:
+      zone: {{ ZONE }}
+      cluster:
+        releaseChannel:
+          channel: REGULAR
+        masterAuthorizedNetworksConfig:
+          enabled: false
+        privateClusterConfig:
+          enablePrivateNodes: true
+          masterIpv4CidrBlock: {{ MASTER_CIDR }}
+        # The resource labels for the cluster to use to annotate any related Google Compute Engine resources.
+        # A note on "vanta-no-alert" - this is used to signal Vanta (compliance vendor) that resources created
+        # in GCP are managed by GKE and not manually created by us
+        # see: https://app.vanta.com/inventory?bulk-tags=open#compute
+        resourceLabels:
+          vanta-no-alert: "resource-managed-by-gke"
+        network: {{ NETWORK }}
+        subnetwork: {{ SUBNET_NAME }}
+        networkConfig:
+          network: {{ NETWORK }}
+          subnetwork: $(ref.{{ SUBNET_NAME }}.selfLink)
+          enableIntraNodeVisibility: true
+        ipAllocationPolicy:
+          useIpAliases: true
+        # Allows access to Google service accounts
+        # ref: https://cloud.google.com/kubernetes-engine/docs/how-to/workload-identity
+        workloadIdentityConfig:
+          workloadPool: {{ PROJECT }}.svc.id.goog
+        maintenancePolicy:
+          window:
+            dailyMaintenanceWindow:
+              # in UTC
+              startTime: 07:00
+        nodePools:
+          - name: default-pool
+            config:
+              machineType: n2-standard-4
+              tags:
+                - {{ NODE_TAG_NAME }}
+            initialNodeCount: 1
+            autoscaling:
+              enabled: true
+              minNodeCount: 1
+              maxNodeCount: 3
+            management:
+              autoUpgrade: true
+              autoRepair: true
+          - name: blog-pool
+            config:
+              machineType: n2-standard-8
+              tags:
+                - {{ NODE_TAG_NAME }}
+            initialNodeCount: 1
+            autoscaling:
+              enabled: true
+              minNodeCount: 1
+              maxNodeCount: 3
+            management:
+              autoUpgrade: true
+              autoRepair: true
+  - name: {{ FIREWALL_RULE }}
+    type: gcp-types/compute-v1:firewalls
+    properties:
+      direction: INGRESS
+      description: "This rule is required for the nginx-ingress admission controller"
+      allowed:
+        - IPProtocol: tcp
+          ports:
+            - 8443
+      network: {{ NETWORK }}
+      sourceRanges:
+        - {{ MASTER_CIDR }}
+      targetTags:
+        - {{ NODE_TAG_NAME }}
