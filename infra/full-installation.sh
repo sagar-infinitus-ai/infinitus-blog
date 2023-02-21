@@ -134,8 +134,7 @@ echo "Creating wp-blog namespace..."
 kubectl create namespace wp-blog
 
 # Set up workload identities
-for ns in default staging unstable; do
-    setup_workload_identity "$gcp_project_id" "$ns" "infinitus-blog" "${blog_sa}"
-done
+setup_workload_identity "$gcp_project_id" "wp-blog" "infinitus-blog" "${blog_sa}"
+
 
 echo -e "\n${cluster_name} has been provisioned."
